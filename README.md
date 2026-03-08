@@ -179,7 +179,11 @@ Thiết bị hỗ trợ cập nhật firmware qua WiFi (Over The Air):
 2. **Nhấn giữ nút 8–15 giây** → màn hình hiện thông báo OTA
 3. Thiết bị tự tải firmware mới về và khởi động lại
 
-> URL firmware: được cấu hình sẵn trong code. Liên hệ nhà sản xuất để biết thêm chi tiết.
+> **URL firmware:**
+> ```
+> https://raw.githubusercontent.com/cuminhbecube/c3-epaer7.5-depg0750rhu590f1cp/main/firmware-ota/firmware.bin
+> ```
+> Để phát hành firmware mới: build → copy `.pio/build/esp32-c3-devkitm-1/firmware.bin` vào folder `firmware-ota/` → git commit & push.
 
 ---
 
@@ -262,9 +266,14 @@ pio run --target uploadfs --upload-port COM10
 
 Chức năng OTA tự động tải firmware từ:
 ```
-https://raw.githubusercontent.com/cuminhbecube/firmware-esp07s-epaper2-Eink8-wr-/main/firmware.bin
+https://raw.githubusercontent.com/cuminhbecube/c3-epaer7.5-depg0750rhu590f1cp/main/firmware-ota/firmware.bin
 ```
-Có thể gọi endpoint `/ota` để kích hoạt thủ công.
+
+**Phát hành firmware mới:**
+1. Build project: `pio run`
+2. Copy file `.pio/build/esp32-c3-devkitm-1/firmware.bin` vào folder `firmware-ota/`
+3. `git add firmware-ota/firmware.bin && git commit -m "release: vX.X" && git push`
+4. Thiết bị sẽ tải về firmware mới khi người dùng kích hoạt OTA (giữ nút 8–15s)
 
 ---
 
@@ -311,6 +320,8 @@ Thay `COM10` bằng cổng COM thực tế của thiết bị.
 c3epaper7.5/
 ├── driver_config.h          # Định nghĩa chân GPIO
 ├── platformio.ini           # Cấu hình build PlatformIO
+├── firmware-ota/
+│   └── firmware.bin         # Firmware binary cho OTA (cập nhật khi release)
 ├── src/
 │   ├── main.cpp             # Firmware chính
 │   └── ImagePage.h          # HTML trang upload ảnh (nhúng trong firmware)
