@@ -21,7 +21,7 @@
 #include "ImagePage.h"
 
 // --- CONFIG ---
-const char* FIRMWARE_URL = "https://raw.githubusercontent.com/cuminhbecube/firmware-esp07s-epaper2-Eink8-wr-/main/firmware.bin";
+const char* FIRMWARE_URL = "https://raw.githubusercontent.com/cuminhbecube/c3-epaer7.5-depg0750rhu590f1cp/main/firmware-ota/firmware.bin";
 
 // --- CONFIG STORE ---
 char config_lat[16] = "21.02";
