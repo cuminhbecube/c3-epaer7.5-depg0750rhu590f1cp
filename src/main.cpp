@@ -194,8 +194,7 @@ static void btnDeepSleepTask(void*) {
             WiFi.mode(WIFI_OFF);
             display.setFullWindow(); display.firstPage();
             do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-            display.powerOff();
-            delay(500);
+            display.hibernate();
             esp_deep_sleep_start(); // không quay lại
         }
         vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -254,7 +253,7 @@ void setup() {
                 WiFi.softAPdisconnect(true); WiFi.mode(WIFI_OFF);
                 display.setFullWindow(); display.firstPage();
                 do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-                display.powerOff(); delay(500);
+                display.hibernate();
                 esp_deep_sleep_start();
             }
             delay(2);
@@ -352,7 +351,7 @@ void setup() {
                             WiFi.softAPdisconnect(true); WiFi.mode(WIFI_OFF);
                             display.setFullWindow(); display.firstPage();
                             do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-                            display.powerOff(); delay(500);
+                            display.hibernate();
                             esp_deep_sleep_start();
                         }
                         delay(2);
@@ -378,7 +377,7 @@ void setup() {
                     WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
                     display.setFullWindow(); display.firstPage();
                     do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-                    display.powerOff(); delay(500);
+                    display.hibernate();
                     esp_deep_sleep_start();
                 } else if (cnt == 1) {
                     // Nhấn ngắn: chuyển ảnh tiếp theo (nếu đang slideshow)
@@ -518,8 +517,7 @@ void loop() {
             display.setFullWindow();
             display.firstPage();
             do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-            display.powerOff();
-            delay(500);
+            display.hibernate();
             esp_deep_sleep_start();
 
         } else if (count == 2) {
