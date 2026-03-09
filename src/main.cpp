@@ -523,8 +523,8 @@ void loop() {
             esp_deep_sleep_start();
 
         } else if (count == 2) {
-            if (showImageMode && countImages() > 1 && !inImageMode) {
-                // Double-press trong image mode: chuyển ảnh tiếp theo
+            // Double-press: chuyển ảnh tiếp theo (bất kỳ chế độ nào, miễn là đang slideshow và có ≥ 2 ảnh)
+            if (showImageMode && countImages() > 1) {
                 Serial.println("[Button] Double-press -> Next image");
                 int next = (currentImageIndex + 1) % MAX_IMAGES;
                 int tries = 0;
@@ -540,14 +540,25 @@ void loop() {
             }
 
         } else if (count == 1) {
+            // Nhấn 1 lần: luôn toggle slideshow ảnh (bất kỳ chế độ nào)
             if (inImageMode) {
+                // Đang ở AP upload mode → thoát về STA rồi vào slideshow nếu có ảnh
                 Serial.println("[Mode] Exiting AP Mode -> STA");
                 inImageMode = false;
                 server.stop();
                 WiFi.mode(WIFI_STA);
                 WiFi.begin();
-                showMessage("RECONNECTING", "Wait for WiFi...");
-                lastWeatherUpdate = 0;
+                if (countImages() > 0) {
+                    showImageMode = true;
+                    currentImageIndex = 0;
+                    while (!LittleFS.exists(imgPath(currentImageIndex)) && currentImageIndex < MAX_IMAGES - 1)
+                        currentImageIndex++;
+                    handleImageUpload();
+                    lastImageSwitch = millis();
+                } else {
+                    showMessage("RECONNECTING", "Wait for WiFi...");
+                    lastWeatherUpdate = 0;
+                }
             } else if (countImages() > 0) {
                 showImageMode = !showImageMode;
                 if (showImageMode) {
