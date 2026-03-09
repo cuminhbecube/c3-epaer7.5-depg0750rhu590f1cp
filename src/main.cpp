@@ -192,6 +192,10 @@ static void btnDeepSleepTask(void*) {
             cnt = 0;
             WiFi.disconnect(true);
             WiFi.mode(WIFI_OFF);
+            display.setFullWindow(); display.firstPage();
+            do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
+            display.powerOff();
+            delay(500);
             esp_deep_sleep_start(); // không quay lại
         }
         vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -274,6 +278,10 @@ void setup() {
     wm.addParameter(&custom_lon);
     wm.addParameter(&custom_rot);
     wm.setSaveConfigCallback(saveConfigCallback);
+    // Hiển thị màn hình WIFI SETUP khi portal mở
+    wm.setAPCallback([](WiFiManager*) {
+        showMessage("WIFI SETUP", "AP: BECUBE-CLOCK\n192.168.4.1");
+    });
 
     // Task FreeRTOS theo dõi 5x press trong khi portal blocking
     TaskHandle_t wmBtnTask = nullptr;
