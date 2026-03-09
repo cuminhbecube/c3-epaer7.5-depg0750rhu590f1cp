@@ -1263,7 +1263,29 @@ void handleImageUpload() {
 
     Serial.println("[Image] Buffers loaded. Drawing...");
 
-    // writeImage must use native 640×384 coordinate space.
+    // writeImage bypasses setRotation and writes directly to the physical panel
+    // buffer. JS pre-rotates data for portrait modes (1/3). For 180° (rotation=2),
+    // we must flip the buffer 180° in-place so the image matches clock orientation.
+    if (config_rotation == 2) {
+        auto rev8 = [](uint8_t b) -> uint8_t {
+            b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+            b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+            b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+            return b;
+        };
+        const uint16_t rowB = NATIVE_W / 8; // 80 bytes per row
+        for (int y = 0; y < NATIVE_H / 2; y++) {
+            uint8_t *r1 = bufBW  + y * rowB, *r2 = bufBW  + (NATIVE_H - 1 - y) * rowB;
+            uint8_t *s1 = bufRed + y * rowB, *s2 = bufRed + (NATIVE_H - 1 - y) * rowB;
+            for (int x = 0; x < rowB; x++) {
+                uint8_t b1 = r1[x], b2 = r2[rowB - 1 - x];
+                r1[x] = rev8(b2);  r2[rowB - 1 - x] = rev8(b1);
+                b1 = s1[x];        b2 = s2[rowB - 1 - x];
+                s1[x] = rev8(b2);  s2[rowB - 1 - x] = rev8(b1);
+            }
+        }
+    }
+
     // For portrait rotations (1/3), temporarily set rotation=0 so writeImage
     // fills the full physical panel correctly with the pre-rotated data.
     bool isPortrait = (config_rotation == 1 || config_rotation == 3);
