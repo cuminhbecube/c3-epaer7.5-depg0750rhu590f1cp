@@ -16,6 +16,10 @@
 8. [Cập nhật firmware OTA](#6-cập-nhật-firmware-ota)
 9. [Đặt lại cấu hình WiFi](#7-đặt-lại-cấu-hình-wifi)
 10. [Thông số kỹ thuật](#thông-số-kỹ-thuật)
+11. [Build & Flash](#build--flash-cho-developer)
+12. [Thư viện sử dụng](#thư-viện-sử-dụng)
+13. [Cấu trúc file](#cấu-trúc-file)
+14. [Ghi chú kỹ thuật](#ghi-chú-kỹ-thuật)
 
 ---
 
@@ -82,7 +86,7 @@ Khi thiết bị khởi động lần đầu (hoặc chưa có WiFi đã lưu):
    - **Rotation** — góc xoay màn hình: `0` / `90` / `180` / `270`
 5. Nhấn **Save** → thiết bị tự kết nối WiFi và bắt đầu hiển thị
 
-> **Lưu ý:** Portal WiFi tự đóng sau **10 phút** nếu không có thao tác. Nếu không kết nối được WiFi, thiết bị tự chuyển sang chế độ tải ảnh.
+> **Lưu ý:** Portal WiFi tự đóng sau **5 phút** nếu không có thao tác. Nếu không kết nối được WiFi trong thời gian này, thiết bị chuyển sang **chế độ offline** — tự động slideshow nếu có ảnh đã lưu, hoặc hiển thị màn hình đồng hồ (không có dữ liệu thời tiết) nếu chưa có ảnh.
 
 ---
 
@@ -167,6 +171,7 @@ Trang web hiển thị:
 | **Nhấn giữ 3–8s** | Bất kỳ | Vào chế độ IMAGE MODE (tải ảnh) |
 | **Nhấn giữ 8–15s** | Bất kỳ | Cập nhật firmware OTA |
 | **Nhấn giữ > 15s** | Bất kỳ | Xóa cấu hình WiFi, khởi động lại |
+| **5 lần nhấn nhanh** | Đang online | Xóa trắng màn hình + vào deep sleep |
 | **Giữ khi cắm điện** | Boot | Vào IMAGE MODE ngay từ đầu |
 
 ---
@@ -232,76 +237,6 @@ pio run --target uploadfs --upload-port COM10
 
 ---
 
-## Tính năng
-
-- **Màn hình đồng hồ + thời tiết**: Hiển thị giờ, ngày, nhiệt độ hiện tại và dự báo 4 ngày (nguồn: Open-Meteo API).
-- **Chế độ ảnh tùy chỉnh**: Upload ảnh nhị phân (640×384, 2bpp 3 màu) qua Wi-Fi — hiển thị ngay lập tức, không nhấp nháy.
-- **Cấu hình Wi-Fi qua WiFiManager**: Lần đầu bật nguồn, thiết bị tạo AP `ESP32C3-CLOCK` để kết nối và nhập tọa độ vị trí.
-- **OTA Firmware Update**: Tự đọng cập nhật firmware từ URL GitHub khi có yêu cầu.
-- **Lưu cấu hình**: Tọa độ địa lý (lat/lon) lưu vào LittleFS dưới dạng JSON.
-
----
-
-## Cách sử dụng
-
-### 1. Cấu hình Wi-Fi (lần đầu)
-
-1. Bật nguồn thiết bị.
-2. Thiết bị tạo hotspot tên **`ESP32C3-CLOCK`**.
-3. Kết nối điện thoại/máy tính vào hotspot đó.
-4. Trình duyệt tự mở trang cấu hình → nhập SSID, mật khẩu Wi-Fi và **Latitude / Longitude** của vị trí.
-5. Lưu → thiết bị kết nối Wi-Fi và bắt đầu hiển thị thời tiết.
-
-### 2. Upload ảnh tùy chỉnh
-
-1. **Nhấn giữ nút BOOT (GPIO 9) khi bật nguồn** → thiết bị vào chế độ Image Mode.
-2. Thiết bị tạo hotspot tên **`ESP32C3-IMG`**.
-3. Kết nối vào hotspot → trình duyệt tự mở trang upload.
-4. Chọn file ảnh nhị phân (`.bin`, 61440 bytes — 30720 bytes BW + 30720 bytes Red, 1bpp mỗi kênh).
-5. Nhấn Upload → ảnh hiển thị ngay trên màn hình E-Ink.
-
-> **Định dạng ảnh**: Raw binary, 640×384 pixels, 1bpp cho kênh đen-trắng và 1bpp cho kênh đỏ. Tổng 61440 bytes.
-
-### 3. OTA Update
-
-Chức năng OTA tự động tải firmware từ:
-```
-https://raw.githubusercontent.com/cuminhbecube/c3-epaer7.5-depg0750rhu590f1cp/main/firmware-ota/firmware.bin
-```
-
-**Phát hành firmware mới:**
-1. Build project: `pio run`
-2. Copy file `.pio/build/esp32-c3-devkitm-1/firmware.bin` vào folder `firmware-ota/`
-3. `git add firmware-ota/firmware.bin && git commit -m "release: vX.X" && git push`
-4. Thiết bị sẽ tải về firmware mới khi người dùng kích hoạt OTA (giữ nút 8–15s)
-
----
-
-## Cài đặt & Build
-
-### Yêu cầu
-
-- [VS Code](https://code.visualstudio.com/) + [PlatformIO IDE Extension](https://platformio.org/install/ide?install=vscode)
-
-### Build và Flash
-
-```bash
-# Build
-platformio run
-
-# Flash firmware
-platformio run --target upload --upload-port COM10
-
-# Flash filesystem (LittleFS)
-platformio run --target uploadfs --upload-port COM10
-
-# Mở Serial Monitor
-platformio device monitor --port COM10 --baud 115200
-```
-
-Thay `COM10` bằng cổng COM thực tế của thiết bị.
-
----
 
 ## Thư viện sử dụng
 
