@@ -9,7 +9,7 @@
 #include <WebServer.h>
 #include <LittleFS.h>
 #include <time.h>
-#include <Wire.h>
+#include <math.h>
 
 #include <GxEPD2_3C.h>
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -19,6 +19,7 @@
 #include "../driver_config.h"
 #include "../include/weather_icons.h"
 #include "ImagePage.h"
+#include "WifiSetupPage.h"
 
 // --- CONFIG ---
 const char* FIRMWARE_URL = "https://raw.githubusercontent.com/cuminhbecube/c3-epaer7.5-depg0750rhu590f1cp/main/firmware-ota/firmware.bin";
@@ -141,32 +142,7 @@ int countImages() {
     return n;
 }
 
-// --- SHT30 SENSOR (I2C: SDA=3, SCL=2) ---
-#define SHT30_ADDR 0x44
-float sensorTemp     = NAN;
-float sensorHumidity = NAN;
-unsigned long lastSensorUpdate = 0;
-const unsigned long SENSOR_UPDATE_INTERVAL = 10000UL; // 10s
 
-void readSHT30() {
-    Wire.beginTransmission(SHT30_ADDR);
-    Wire.write(0x2C); // clock stretch disabled
-    Wire.write(0x06); // high repeatability
-    if (Wire.endTransmission() != 0) {
-        Serial.println("[SHT30] No ACK");
-        return;
-    }
-    delay(20); // measurement time ~15ms
-    if (Wire.requestFrom((uint8_t)SHT30_ADDR, (uint8_t)6) < 6) {
-        Serial.println("[SHT30] Short read");
-        return;
-    }
-    uint8_t data[6];
-    for (int i = 0; i < 6; i++) data[i] = Wire.read();
-    sensorTemp     = ((data[0] << 8 | data[1]) * 175.0f / 65535.0f) - 45.0f;
-    sensorHumidity = (data[3] << 8 | data[4]) * 100.0f / 65535.0f;
-    Serial.printf("[SHT30] Temp=%.1fC Hum=%.0f%%\n", sensorTemp, sensorHumidity);
-}
 
 // --- BUTTON ---
 const int BTN_PIN = PIN_SWITCH_1;
@@ -174,7 +150,7 @@ int lastBtnState = HIGH;
 unsigned long pressStartTime = 0;
 bool isPressing = false;
 unsigned long lastReleaseTime = 0;   // thời điểm nhả nút lần trước
-bool waitingDoublePress = false;     // đang chờ lần nhấn thứ 2
+int pressCount = 0;                  // số lần nhấn liên tiếp trong khoảng DOUBLE_PRESS_GAP
 const unsigned long DOUBLE_PRESS_GAP = 400; // ms tối đa giữa 2 lần nhấn
 
 // --- NTP ---
@@ -212,10 +188,6 @@ void setup() {
     }
 
     // Init SPI with custom pins, then init display
-    // I2C for SHT30 sensor (SDA=3, SCL=2)
-    Wire.begin(3, 2);
-    readSHT30();
-
     SPI.begin(EPD_SCK, -1, EPD_MOSI, EPD_CS);
     display.init(115200, true, 10, false);
     display.setRotation(2);
@@ -240,8 +212,9 @@ void setup() {
     display.setRotation(config_rotation);
 
     WiFiManager wm;
+    wm.setCustomHeadElement(WM_HEAD_EXTRA);
     wm.setConnectTimeout(30);
-    wm.setConfigPortalTimeout(600); // 10 minutes to configure WiFi
+    wm.setConfigPortalTimeout(300); // 5 phút config portal, sau đó tự thoát
 
     char rotDegStr[4];
     snprintf(rotDegStr, sizeof(rotDegStr), "%d", rotIdxToDeg(config_rotation));
@@ -255,17 +228,83 @@ void setup() {
 
     Serial.println("[WiFi] Connecting...");
     if (!wm.autoConnect("BECUBE-CLOCK")) {
-        Serial.println("[WiFi] No connection — auto entering Image Server mode");
-        startImageServer();
-        inImageMode = true;
+        // Hết 5 phút không có WiFi/config → tắt AP, chuyển sang slideshow hoặc vẽ màn hình bình thường
+        Serial.println("[WiFi] No connection after 5 min — switching to offline/slideshow mode");
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        display.setRotation(config_rotation);
+        if (countImages() > 0) {
+            showImageMode = true;
+            currentImageIndex = 0;
+            while (!LittleFS.exists(imgPath(currentImageIndex)) && currentImageIndex < MAX_IMAGES - 1)
+                currentImageIndex++;
+            handleImageUpload();
+            lastImageSwitch = millis();
+        } else {
+            drawScreen();
+        }
+        // Vòng lặp offline: chỉ xử lý nút, không fetch weather
         while (1) {
-            server.handleClient();
-            if (imageUpdatePending) {
-                delay(200);
-                handleImageUpload();
-                imageUpdatePending = false;
+            int r = digitalRead(BTN_PIN);
+            static int lastBtnOffline = HIGH;
+            static unsigned long pressStartOffline = 0;
+            if (r == LOW && lastBtnOffline == HIGH) pressStartOffline = millis();
+            if (r == HIGH && lastBtnOffline == LOW) {
+                unsigned long dur = millis() - pressStartOffline;
+                if (dur >= 8000) {
+                    // Giữ 8s → vào Image Server mode để upload ảnh
+                    startImageServer();
+                    inImageMode = true;
+                    while (1) {
+                        server.handleClient();
+                        if (imageUpdatePending) {
+                            delay(200);
+                            handleImageUpload();
+                            imageUpdatePending = false;
+                            showImageMode = true;
+                            server.stop();
+                            inImageMode = false;
+                            WiFi.softAPdisconnect(true);
+                            WiFi.mode(WIFI_OFF);
+                        }
+                        delay(2);
+                    }
+                } else if (dur >= 15000) {
+                    enterConfigMode(); // reset WiFi
+                } else if (dur < 3000) {
+                    // Nhấn ngắn: chuyển ảnh tiếp theo (nếu đang slideshow)
+                    if (showImageMode && countImages() > 1) {
+                        int next = (currentImageIndex + 1) % MAX_IMAGES;
+                        int tries = 0;
+                        while (!LittleFS.exists(imgPath(next)) && tries < MAX_IMAGES) {
+                            next = (next + 1) % MAX_IMAGES;
+                            tries++;
+                        }
+                        if (LittleFS.exists(imgPath(next))) {
+                            currentImageIndex = next;
+                            handleImageUpload();
+                            lastImageSwitch = millis();
+                        }
+                    }
+                }
             }
-            delay(2);
+            lastBtnOffline = r;
+            // Slideshow tự động mỗi 5 phút
+            if (showImageMode && countImages() > 1 &&
+                (millis() - lastImageSwitch > IMAGE_SWITCH_INTERVAL)) {
+                int next = (currentImageIndex + 1) % MAX_IMAGES;
+                int tries = 0;
+                while (!LittleFS.exists(imgPath(next)) && tries < MAX_IMAGES) {
+                    next = (next + 1) % MAX_IMAGES;
+                    tries++;
+                }
+                if (LittleFS.exists(imgPath(next))) {
+                    currentImageIndex = next;
+                    handleImageUpload();
+                    lastImageSwitch = millis();
+                }
+            }
+            delay(50);
         }
     } else {
         Serial.println("[WiFi] Connected");
@@ -330,13 +369,53 @@ void loop() {
         Serial.printf("[Button] Released. Duration: %lu ms\n", duration);
 
         if (duration < 3000) {
-            // --- Phát hiện double-press ---
+            // Đếm số lần nhấn ngắn, chưa xử lý ngay
             unsigned long now_ms = millis();
-            bool isDouble = waitingDoublePress && (now_ms - lastReleaseTime <= DOUBLE_PRESS_GAP);
-            waitingDoublePress = !isDouble; // lần tiếp theo kiểm tra double nếu đây là lần 1
+            if (now_ms - lastReleaseTime <= DOUBLE_PRESS_GAP) {
+                pressCount++;
+            } else {
+                pressCount = 1;
+            }
             lastReleaseTime = now_ms;
+        } else if (duration < 8000) {
+            pressCount = 0;
+            Serial.println("[Mode] Entering Image Server Mode");
+            startImageServer();
+            inImageMode = true;
+        } else if (duration < 15000) {
+            pressCount = 0;
+            Serial.println("[Mode] Starting OTA");
+            performOTA();
+        } else {
+            pressCount = 0;
+            Serial.println("[Mode] Resetting WiFi Config");
+            enterConfigMode();
+        }
+    }
+    lastBtnState = reading;
 
-            if (isDouble && showImageMode && countImages() > 1 && !inImageMode) {
+    // --- Xử LÝ DEFERRED: sau DOUBLE_PRESS_GAP kể từ lần nhấn cuối ---
+    if (pressCount > 0 && !isPressing &&
+        (millis() - lastReleaseTime > DOUBLE_PRESS_GAP)) {
+
+        int count = pressCount;
+        pressCount = 0;
+        Serial.printf("[Button] Action: count=%d\n", count);
+
+        if (count >= 5) {
+            // Xóa trắng màn hình và vào deep sleep
+            Serial.println("[Button] 5x -> Deep Sleep");
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF);
+            display.setFullWindow();
+            display.firstPage();
+            do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
+            display.powerOff();
+            delay(500);
+            esp_deep_sleep_start();
+
+        } else if (count == 2) {
+            if (showImageMode && countImages() > 1 && !inImageMode) {
                 // Double-press trong image mode: chuyển ảnh tiếp theo
                 Serial.println("[Button] Double-press -> Next image");
                 int next = (currentImageIndex + 1) % MAX_IMAGES;
@@ -350,7 +429,9 @@ void loop() {
                     handleImageUpload();
                     lastImageSwitch = millis();
                 }
-            } else if (!isDouble) {
+            }
+
+        } else if (count == 1) {
             if (inImageMode) {
                 Serial.println("[Mode] Exiting AP Mode -> STA");
                 inImageMode = false;
@@ -374,20 +455,9 @@ void loop() {
                 fetchWeather();
                 drawScreen();
             }
-            } // end !isDouble
-        } else if (duration < 8000) {
-            Serial.println("[Mode] Entering Image Server Mode");
-            startImageServer();
-            inImageMode = true;
-        } else if (duration < 15000) {
-            Serial.println("[Mode] Starting OTA");
-            performOTA();
-        } else {
-            Serial.println("[Mode] Resetting WiFi Config");
-            enterConfigMode();
         }
+        // count 3, 4: bỏ qua
     }
-    lastBtnState = reading;
 
     // --- IMAGE MODE LOOP ---
     if (inImageMode) {
@@ -420,12 +490,6 @@ void loop() {
 
     // --- AUTO UPDATE ---
     unsigned long now = millis();
-
-    // Đọc cảm biến SHT30 mỗi 10s (không trigger display refresh)
-    if (now - lastSensorUpdate > SENSOR_UPDATE_INTERVAL) {
-        lastSensorUpdate = now;
-        readSHT30();
-    }
 
     if (!isPressing) {
         if (!showImageMode && (now - lastTimeUpdate > TIME_UPDATE_INTERVAL)) {
@@ -526,6 +590,94 @@ const char* wmoDesc(int code) {
 }
 
 // =============================================================================
+// LUNAR CALENDAR — Vietnamese Am Lich (algorithm by Ho Ngoc Duc)
+// =============================================================================
+static long jdFromDate(int dd, int mm, int yyyy) {
+    long a = (14 - mm) / 12;
+    long y = yyyy + 4800 - a;
+    long m = mm + 12 * a - 3;
+    return dd + (153*m + 2)/5 + 365*y + y/4 - y/100 + y/400 - 32045;
+}
+static long getNewMoonDay(int k, float tz) {
+    const double dr = M_PI / 180.0;
+    double T  = k / 1236.85, T2 = T*T, T3 = T2*T;
+    double Jd1 = 2415020.75933 + 29.53058868*k + 0.0001178*T2 - 0.000000155*T3;
+    Jd1 += 0.00033 * sin((166.56 + 132.87*T - 0.009173*T2) * dr);
+    double M   = 357.52910 + 29.10535608*k - 0.0000333*T2 - 0.00000347*T3;
+    double Mpr = 306.0253 + 385.81691806*k + 0.0107306*T2 + 0.00001236*T3;
+    double F   = 21.2964 + 390.67050646*k - 0.0016528*T2 - 0.00000239*T3;
+    double C1  = (0.1734 - 0.000393*T)*sin(M*dr) + 0.0021*sin(2*dr*M)
+               - 0.4068*sin(Mpr*dr) + 0.0161*sin(2*dr*Mpr) - 0.0004*sin(3*dr*Mpr)
+               + 0.0104*sin(2*dr*F)  - 0.0051*sin((M+Mpr)*dr) - 0.0074*sin((M-Mpr)*dr)
+               + 0.0004*sin((2*F+M)*dr) - 0.0004*sin((2*F-M)*dr) - 0.0006*sin((2*F+Mpr)*dr)
+               + 0.0010*sin((2*F-Mpr)*dr) + 0.0005*sin((M+2*Mpr)*dr);
+    double dt = (T < -11) ? 0.001 + 0.000839*T + 0.0002261*T2 - 0.00000845*T3 - 0.000000081*T*T3
+                           : -0.000278 + 0.000265*T + 0.000262*T2;
+    return (long)(Jd1 + C1 - dt + 0.5 + tz/24.0);
+}
+static int getSunLongitude(long jdn, float tz) {
+    const double dr = M_PI / 180.0;
+    double T = (jdn - 2451545.5 - tz/24.0) / 36525.0, T2 = T*T;
+    double M  = 357.52910 + 35999.05030*T - 0.0001559*T2 - 0.00000048*T*T2;
+    double L0 = 280.46645 + 36000.76983*T + 0.0003032*T2;
+    double DL = (1.9146 - 0.004817*T - 0.000014*T2)*sin(dr*M)
+              + (0.019993 - 0.000101*T)*sin(dr*2*M) + 0.00029*sin(dr*3*M);
+    double L  = (L0 + DL - 0.00569 - 0.00478*sin((125.04 - 1934.136*T)*dr)) * dr;
+    L -= M_PI*2 * (int)(L / (M_PI*2));
+    if (L < 0) L += M_PI*2;
+    return (int)(L / M_PI * 6);
+}
+static long getLeapMonthOffset(long a11, float tz) {
+    int k = (int)((a11 - 2415021.076998695) / 29.530588853 + 0.5);
+    int last = 0, i = 1;
+    int arc = getSunLongitude(getNewMoonDay(k+i, tz), tz);
+    do { last = arc; i++; arc = getSunLongitude(getNewMoonDay(k+i, tz), tz); } while (arc != last && i < 14);
+    return i - 1;
+}
+struct LunarDate { int day, month, year; bool leap; };
+static LunarDate solarToLunar(int dd, int mm, int yyyy) {
+    const float TZ = 7.0f;
+    long dayNum = jdFromDate(dd, mm, yyyy);
+    int  k   = (int)((dayNum - 2415021.076998695) / 29.530588853);
+    long mon = getNewMoonDay(k+1, TZ);
+    if (mon > dayNum) mon = getNewMoonDay(k, TZ);
+    long a11_cur = getNewMoonDay((int)((jdFromDate(31,12,yyyy)   - 2415021.076998695) / 29.530588853), TZ);
+    long a11, b11; int yy;
+    if (a11_cur >= mon) {
+        yy  = yyyy;
+        a11 = getNewMoonDay((int)((jdFromDate(31,12,yyyy-1) - 2415021.076998695) / 29.530588853), TZ);
+        b11 = a11_cur;
+    } else {
+        yy  = yyyy + 1;
+        a11 = a11_cur;
+        b11 = getNewMoonDay((int)((jdFromDate(31,12,yyyy+1) - 2415021.076998695) / 29.530588853), TZ);
+    }
+    int  lunarDay = (int)(dayNum - mon) + 1;
+    long diff     = (mon - a11) / 29;
+    bool leapMon  = false;
+    int  lunarMon = (int)diff + 11;
+    if (b11 - a11 > 365) {
+        long lo = getLeapMonthOffset(a11, TZ);
+        if (diff >= lo) { lunarMon = (int)diff + 10; if (diff == lo) leapMon = true; }
+    }
+    if (lunarMon > 12) lunarMon -= 12;
+    if (lunarMon >= 11 && diff < 4) yy--;
+    return { lunarDay, lunarMon, yy, leapMon };
+}
+static const char* canChiYear(int year) {
+    static char buf[16];
+    // Earthly Branches mapped to English zodiac animals (same index as chi array)
+    const char* animal[] = {"Monkey","Rooster","Dog","Pig","Rat","Ox","Tiger","Rabbit","Dragon","Snake","Horse","Goat"};
+    snprintf(buf, sizeof(buf), "Yr. %s", animal[year % 12]);
+    return buf;
+}
+static const char* lunarMonthName(int m) {
+    const char* names[] = {"","Month 1","Month 2","Month 3","Month 4","Month 5","Month 6",
+                            "Month 7","Month 8","Month 9","Month 10","Month 11","Month 12"};
+    return (m >= 1 && m <= 12) ? names[m] : "---";
+}
+
+// =============================================================================
 // DRAW SCREEN PORTRAIT (rotation 1=90° or 3=270°) — 384×640
 // =============================================================================
 void drawScreenPortrait() {
@@ -569,26 +721,37 @@ void drawScreenPortrait() {
         // ── DIVIDER ────────────────────────────────
         display.drawLine(10, 116, W - 10, 116, GxEPD_BLACK);
 
-        // ── INDOOR (left 1/3) ──────────────────── y: 116-215
+        // ── LICH AM (left 1/3) ──────────────────── y: 116-215
         {
             int cx = W / 6;
+            LunarDate lunar = solarToLunar(timeinfo->tm_mday, timeinfo->tm_mon+1, timeinfo->tm_year+1900);
+
             display.setFont(&FreeSansBold9pt7b);
-            display.getTextBounds("INDOOR", 0, 0, &tbx, &tby, &tbw, &tbh);
-            display.setCursor(cx - tbw/2, 131);
-            display.print("INDOOR");
+            display.getTextBounds("LUNAR", 0, 0, &tbx, &tby, &tbw, &tbh);
+            display.setCursor(cx - tbw/2, 129);
+            display.print("LUNAR");
 
             display.setFont(&FreeSansBold18pt7b);
-            String inTemp = isnan(sensorTemp) ? "--.-" : String(sensorTemp, 1);
-            inTemp += (char)176; inTemp += "C";
-            display.getTextBounds(inTemp.c_str(), 0, 0, &tbx, &tby, &tbw, &tbh);
-            display.setCursor(cx - tbw/2, 170);
-            display.print(inTemp);
+            char lunarDayBuf[10];
+            snprintf(lunarDayBuf, sizeof(lunarDayBuf), "%d", lunar.day);
+            display.getTextBounds(lunarDayBuf, 0, 0, &tbx, &tby, &tbw, &tbh);
+            display.setCursor(cx - tbw/2, 162);
+            display.print(lunarDayBuf);
 
             display.setFont(&FreeSansBold9pt7b);
-            String humStr = isnan(sensorHumidity) ? "Hum: --" : "Hum: " + String((int)sensorHumidity) + "%";
-            display.getTextBounds(humStr.c_str(), 0, 0, &tbx, &tby, &tbw, &tbh);
-            display.setCursor(cx - tbw/2, 194);
-            display.print(humStr);
+            char monBuf[12];
+            if (lunar.leap)
+                snprintf(monBuf, sizeof(monBuf), "%s*", lunarMonthName(lunar.month));
+            else
+                snprintf(monBuf, sizeof(monBuf), "%s", lunarMonthName(lunar.month));
+            display.getTextBounds(monBuf, 0, 0, &tbx, &tby, &tbw, &tbh);
+            display.setCursor(cx - tbw/2, 180);
+            display.print(monBuf);
+
+            const char* cc = canChiYear(lunar.year);
+            display.getTextBounds(cc, 0, 0, &tbx, &tby, &tbw, &tbh);
+            display.setCursor(cx - tbw/2, 198);
+            display.print(cc);
         }
 
         // ── WEATHER icon+desc (center 1/3) ──────── y: 116-215
@@ -677,7 +840,7 @@ void drawScreenPortrait() {
 // DRAW SCREEN (Clock + Sensor + Weather)
 // =============================================================================
 void drawScreen() {
-    Serial.printf("[Draw] Weather Valid: %d, SensorTemp: %.1f\n", weather.valid, sensorTemp);
+    Serial.printf("[Draw] Weather Valid: %d\n", weather.valid);
 
     display.setFullWindow();
 
@@ -730,27 +893,42 @@ void drawScreen() {
         // ── DIVIDER ───────────────────────────── y: 112
         display.drawLine(10, Y + 112, 630, Y + 112, GxEPD_BLACK);
 
-        // ── INDOOR SENSOR (left 1/3: x 0-213) ── y: 118-240
+        // ── LICH AM (left 1/3: x 0-213) ── y: 118-240
         {
-            display.setFont(&FreeSansBold9pt7b);
-            const char* inLabel = "INDOOR";
-            display.getTextBounds(inLabel, 0, 0, &tbx, &tby, &tbw, &tbh);
-            display.setCursor(106 - tbw/2, Y + 132);
-            display.print(inLabel);
+            const int cx = 106;
+            LunarDate lunar = solarToLunar(timeinfo->tm_mday, timeinfo->tm_mon+1, timeinfo->tm_year+1900);
 
+            // Label
+            display.setFont(&FreeSansBold9pt7b);
+            const char* lbl = "LUNAR";
+            display.getTextBounds(lbl, 0, 0, &tbx, &tby, &tbw, &tbh);
+            display.setCursor(cx - tbw/2, Y + 130);
+            display.print(lbl);
+
+            // Ngay / Thang am lich — font lon
             display.setFont(&FreeSansBold18pt7b);
-            String inTemp = isnan(sensorTemp) ? "--.-" : String(sensorTemp, 1);
-            inTemp += (char)176; // degree
-            inTemp += "C";
-            display.getTextBounds(inTemp.c_str(), 0, 0, &tbx, &tby, &tbw, &tbh);
-            display.setCursor(106 - tbw/2, Y + 175);
-            display.print(inTemp);
+            char lunarDayBuf[10];
+            snprintf(lunarDayBuf, sizeof(lunarDayBuf), "%d", lunar.day);
+            display.getTextBounds(lunarDayBuf, 0, 0, &tbx, &tby, &tbw, &tbh);
+            display.setCursor(cx - tbw/2, Y + 168);
+            display.print(lunarDayBuf);
 
+            // Ten thang am
             display.setFont(&FreeSansBold9pt7b);
-            String humStr = isnan(sensorHumidity) ? "Hum: --" : "Hum: " + String((int)sensorHumidity) + "%";
-            display.getTextBounds(humStr.c_str(), 0, 0, &tbx, &tby, &tbw, &tbh);
-            display.setCursor(106 - tbw/2, Y + 200);
-            display.print(humStr);
+            char monBuf[12];
+            if (lunar.leap)
+                snprintf(monBuf, sizeof(monBuf), "%s*", lunarMonthName(lunar.month));
+            else
+                snprintf(monBuf, sizeof(monBuf), "%s", lunarMonthName(lunar.month));
+            display.getTextBounds(monBuf, 0, 0, &tbx, &tby, &tbw, &tbh);
+            display.setCursor(cx - tbw/2, Y + 188);
+            display.print(monBuf);
+
+            // Nam Can Chi
+            const char* cc = canChiYear(lunar.year);
+            display.getTextBounds(cc, 0, 0, &tbx, &tby, &tbw, &tbh);
+            display.setCursor(cx - tbw/2, Y + 207);
+            display.print(cc);
         }
 
         // ── WEATHER ICON + DESC (center 1/3: x 213-426) ── y: 118-240
@@ -784,7 +962,7 @@ void drawScreen() {
             display.setFont(&FreeSansBold18pt7b);
             String outTemp = String((int)round(weather.currentTemp));
             outTemp += (char)176;
-            outTemp += "C";
+            outTemp += "*C";
             display.getTextBounds(outTemp.c_str(), 0, 0, &tbx, &tby, &tbw, &tbh);
             display.setCursor(cx - tbw/2, Y + 175);
             display.print(outTemp);
@@ -960,6 +1138,7 @@ void enterConfigMode() {
     delay(300);
 
     WiFiManager wm;
+    wm.setCustomHeadElement(WM_HEAD_EXTRA);
     // Pin the portal IP so 192.168.4.1 always works
     wm.setAPStaticIPConfig(
         IPAddress(192, 168, 4, 1),
