@@ -172,6 +172,32 @@ void enterConfigMode();
 void showMessage(String msg, String subMsg);
 const unsigned char* getIcon(int code);
 
+// FreeRTOS task chạy song song với blocking WiFiManager portal
+// Nhấn 5x → deep sleep ngay lập tức mà không cần thoát portal
+static void btnDeepSleepTask(void*) {
+    int state = HIGH;
+    unsigned long ps = 0, lr = 0;
+    int cnt = 0;
+    while (true) {
+        int r = digitalRead(BTN_PIN);
+        if (r == LOW  && state == HIGH) ps = millis();
+        if (r == HIGH && state == LOW) {
+            if (millis() - ps < 3000) {
+                if (millis() - lr <= DOUBLE_PRESS_GAP) cnt++; else cnt = 1;
+                lr = millis();
+            } else cnt = 0;
+        }
+        state = r;
+        if (cnt >= 5 && r == HIGH && (millis() - lr > DOUBLE_PRESS_GAP)) {
+            cnt = 0;
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF);
+            esp_deep_sleep_start(); // không quay lại
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+}
+
 // =============================================================================
 // SETUP
 // =============================================================================
@@ -237,7 +263,7 @@ void setup() {
     WiFiManager wm;
     wm.setCustomHeadElement(WM_HEAD_EXTRA);
     wm.setConnectTimeout(30);
-    wm.setConfigPortalBlocking(false); // non-blocking → cho phép kiểm tra nút trong portal
+    wm.setConfigPortalTimeout(300); // 5 phút config portal, sau đó tự thoát
 
     char rotDegStr[4];
     snprintf(rotDegStr, sizeof(rotDegStr), "%d", rotIdxToDeg(config_rotation));
@@ -249,37 +275,17 @@ void setup() {
     wm.addParameter(&custom_rot);
     wm.setSaveConfigCallback(saveConfigCallback);
 
+    // Task FreeRTOS theo dõi 5x press trong khi portal blocking
+    TaskHandle_t wmBtnTask = nullptr;
+    xTaskCreate(btnDeepSleepTask, "wm_btn", 1024, nullptr, 1, &wmBtnTask);
+
     Serial.println("[WiFi] Connecting...");
     bool wmConnected = wm.autoConnect("BECUBE-CLOCK");
+
+    if (wmBtnTask) { vTaskDelete(wmBtnTask); wmBtnTask = nullptr; }
+
     if (!wmConnected) {
-        // Portal đang chạy non-blocking — vòng lặp 5 phút với hỗ trợ nhấn 5x deep sleep
-        int    wmBtn = HIGH; unsigned long wmPs = 0, wmLr = 0; int wmCnt = 0;
-        unsigned long wmDeadline = millis() + 300000UL;
-        while (millis() < wmDeadline) {
-            if (!wm.process()) { wmConnected = (WiFi.status() == WL_CONNECTED); break; }
-            if (WiFi.status() == WL_CONNECTED) { wmConnected = true; break; }
-            int rb = digitalRead(BTN_PIN);
-            if (rb == LOW  && wmBtn == HIGH) wmPs = millis();
-            if (rb == HIGH && wmBtn == LOW) {
-                if (millis() - wmPs < 3000) {
-                    if (millis() - wmLr <= DOUBLE_PRESS_GAP) wmCnt++; else wmCnt = 1;
-                    wmLr = millis();
-                } else wmCnt = 0;
-            }
-            wmBtn = rb;
-            if (wmCnt >= 5 && rb == HIGH && (millis() - wmLr > DOUBLE_PRESS_GAP)) {
-                wmCnt = 0;
-                WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
-                display.setFullWindow(); display.firstPage();
-                do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-                display.powerOff(); delay(500);
-                esp_deep_sleep_start();
-            }
-            delay(10);
-        }
-    }
-    if (!wmConnected) {
-        // Hết 5 phút không có WiFi/config → tắt AP, chuyển sang slideshow hoặc vẽ màn hình bình thường
+        // Hết 5 phút → offline
         Serial.println("[WiFi] No connection after 5 min — switching to offline/slideshow mode");
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
@@ -1240,7 +1246,6 @@ void enterConfigMode() {
         IPAddress(255, 255, 255, 0));
     // No timeout — stay open until user saves config
     wm.setConfigPortalTimeout(0);
-    wm.setConfigPortalBlocking(false); // non-blocking → cho phép kiểm tra nút trong portal
 
     // Re-add custom params so they survive a portal re-save
     char rotDegStr[4];
@@ -1252,31 +1257,15 @@ void enterConfigMode() {
     wm.addParameter(&p_lon);
     wm.addParameter(&p_rot);
 
-    wm.startConfigPortal("BECUBE-CLOCK");
-    // Portal chạy non-blocking — vòng lặp vô hạn với hỗ trợ nhấn 5x deep sleep
-    int    wmBtn2 = HIGH; unsigned long wmPs2 = 0, wmLr2 = 0; int wmCnt2 = 0;
-    while (true) {
-        if (!wm.process()) break; // portal đã đóng (user đã save và kết nối)
-        int rb = digitalRead(BTN_PIN);
-        if (rb == LOW  && wmBtn2 == HIGH) wmPs2 = millis();
-        if (rb == HIGH && wmBtn2 == LOW) {
-            if (millis() - wmPs2 < 3000) {
-                if (millis() - wmLr2 <= DOUBLE_PRESS_GAP) wmCnt2++; else wmCnt2 = 1;
-                wmLr2 = millis();
-            } else wmCnt2 = 0;
-        }
-        wmBtn2 = rb;
-        if (wmCnt2 >= 5 && rb == HIGH && (millis() - wmLr2 > DOUBLE_PRESS_GAP)) {
-            wmCnt2 = 0;
-            WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
-            display.setFullWindow(); display.firstPage();
-            do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
-            display.powerOff(); delay(500);
-            esp_deep_sleep_start();
-        }
-        delay(10);
-    }
-    if (shouldSaveConfig) {
+    // Task FreeRTOS theo dõi 5x press trong khi portal blocking
+    TaskHandle_t wmBtnTask2 = nullptr;
+    xTaskCreate(btnDeepSleepTask, "wm_btn2", 1024, nullptr, 1, &wmBtnTask2);
+
+    bool saved = wm.startConfigPortal("BECUBE-CLOCK");
+
+    if (wmBtnTask2) { vTaskDelete(wmBtnTask2); wmBtnTask2 = nullptr; }
+
+    if (saved) {
         strcpy(config_lat, p_lat.getValue());
         strcpy(config_lon, p_lon.getValue());
         config_rotation = rotDegToIdx(atoi(p_rot.getValue()));
