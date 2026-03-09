@@ -197,12 +197,35 @@ void setup() {
     if (digitalRead(BTN_PIN) == LOW) {
         startImageServer();
         inImageMode = true;
+        // Button state for 5x deep sleep
+        static int btnBoot = HIGH;
+        static unsigned long psBoot = 0;
+        static int cntBoot = 0;
+        static unsigned long lrBoot = 0;
         while (1) {
             server.handleClient();
             if (imageUpdatePending) {
                 delay(200);
                 handleImageUpload();
                 imageUpdatePending = false;
+            }
+            // 5x press → deep sleep
+            int rb = digitalRead(BTN_PIN);
+            if (rb == LOW  && btnBoot == HIGH) psBoot = millis();
+            if (rb == HIGH && btnBoot == LOW) {
+                if (millis() - psBoot < 3000) {
+                    if (millis() - lrBoot <= DOUBLE_PRESS_GAP) cntBoot++; else cntBoot = 1;
+                    lrBoot = millis();
+                } else { cntBoot = 0; }
+            }
+            btnBoot = rb;
+            if (cntBoot >= 5 && rb == HIGH && (millis() - lrBoot > DOUBLE_PRESS_GAP)) {
+                cntBoot = 0;
+                WiFi.softAPdisconnect(true); WiFi.mode(WIFI_OFF);
+                display.setFullWindow(); display.firstPage();
+                do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
+                display.powerOff(); delay(500);
+                esp_deep_sleep_start();
             }
             delay(2);
         }
@@ -248,13 +271,18 @@ void setup() {
             int r = digitalRead(BTN_PIN);
             static int lastBtnOffline = HIGH;
             static unsigned long pressStartOffline = 0;
+            static int offlinePressCount = 0;
+            static unsigned long offlineLastRelease = 0;
             if (r == LOW && lastBtnOffline == HIGH) pressStartOffline = millis();
             if (r == HIGH && lastBtnOffline == LOW) {
                 unsigned long dur = millis() - pressStartOffline;
                 if (dur >= 8000) {
+                    offlinePressCount = 0;
                     // Giữ 8s → vào Image Server mode để upload ảnh
                     startImageServer();
                     inImageMode = true;
+                    static int btnIs = HIGH; static unsigned long psIs = 0;
+                    static int cntIs = 0;    static unsigned long lrIs = 0;
                     while (1) {
                         server.handleClient();
                         if (imageUpdatePending) {
@@ -267,11 +295,50 @@ void setup() {
                             WiFi.softAPdisconnect(true);
                             WiFi.mode(WIFI_OFF);
                         }
+                        // 5x press → deep sleep
+                        int rr = digitalRead(BTN_PIN);
+                        if (rr == LOW  && btnIs == HIGH) psIs = millis();
+                        if (rr == HIGH && btnIs == LOW) {
+                            if (millis() - psIs < 3000) {
+                                if (millis() - lrIs <= DOUBLE_PRESS_GAP) cntIs++; else cntIs = 1;
+                                lrIs = millis();
+                            } else { cntIs = 0; }
+                        }
+                        btnIs = rr;
+                        if (cntIs >= 5 && rr == HIGH && (millis() - lrIs > DOUBLE_PRESS_GAP)) {
+                            cntIs = 0;
+                            WiFi.softAPdisconnect(true); WiFi.mode(WIFI_OFF);
+                            display.setFullWindow(); display.firstPage();
+                            do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
+                            display.powerOff(); delay(500);
+                            esp_deep_sleep_start();
+                        }
                         delay(2);
                     }
                 } else if (dur >= 15000) {
+                    offlinePressCount = 0;
                     enterConfigMode(); // reset WiFi
                 } else if (dur < 3000) {
+                    unsigned long now_ms = millis();
+                    if (now_ms - offlineLastRelease <= DOUBLE_PRESS_GAP) offlinePressCount++;
+                    else offlinePressCount = 1;
+                    offlineLastRelease = now_ms;
+                }
+            }
+            lastBtnOffline = r;
+            // Deferred multi-press action
+            if (offlinePressCount > 0 && r == HIGH &&
+                (millis() - offlineLastRelease > DOUBLE_PRESS_GAP)) {
+                int cnt = offlinePressCount;
+                offlinePressCount = 0;
+                if (cnt >= 5) {
+                    Serial.println("[Offline] 5x -> Deep Sleep");
+                    WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
+                    display.setFullWindow(); display.firstPage();
+                    do { display.fillScreen(GxEPD_WHITE); } while (display.nextPage());
+                    display.powerOff(); delay(500);
+                    esp_deep_sleep_start();
+                } else if (cnt == 1) {
                     // Nhấn ngắn: chuyển ảnh tiếp theo (nếu đang slideshow)
                     if (showImageMode && countImages() > 1) {
                         int next = (currentImageIndex + 1) % MAX_IMAGES;
@@ -288,7 +355,6 @@ void setup() {
                     }
                 }
             }
-            lastBtnOffline = r;
             // Slideshow tự động mỗi 5 phút
             if (showImageMode && countImages() > 1 &&
                 (millis() - lastImageSwitch > IMAGE_SWITCH_INTERVAL)) {
